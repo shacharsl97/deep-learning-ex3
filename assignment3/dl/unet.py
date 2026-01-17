@@ -181,6 +181,12 @@ class Unet(nn.Module):
             # load a pretrained checkpoint.
             ##################################################################
 
+            block1 = ResnetBlock(dim_in, dim_in, context_dim=context_dim)
+            block2 = ResnetBlock(dim_in, dim_in, context_dim=context_dim)
+            block3 = Downsample(dim_in, dim_out)
+
+            down_block = nn.ModuleList([block1, block2, block3])
+
             ##################################################################
             self.downs.append(down_block)
 
@@ -205,6 +211,12 @@ class Unet(nn.Module):
             # channels at the input of both ResnetBlocks.
             ##################################################################
 
+            block1 = Upsample(dim_in, dim_out)
+            block2 = ResnetBlock(2 * dim_out, dim_out, context_dim=context_dim)
+            block3 = ResnetBlock(2 * dim_out, dim_out, context_dim=context_dim)
+
+            up_block = nn.ModuleList([block1, block2, block3])
+
             self.ups.append(up_block)
             ##################################################################
 
@@ -214,10 +226,11 @@ class Unet(nn.Module):
     def cfg_forward(self, x, time, model_kwargs={}):
         """Classifier-free guidance forward pass. model_kwargs should contain `cfg_scale`."""
 
+        model_kwargs = model_kwargs.copy()
         cfg_scale = model_kwargs.pop("cfg_scale")
-        print("Classifier-free guidance scale:", cfg_scale)
-        model_kwargs = copy.deepcopy(model_kwargs)
-
+        
+        if time[0] == 99:
+            print(f"Classifier-free guidance scale: {cfg_scale}")
         ##################################################################
         # TODO: Apply classifier-free guidance using Eq. (6) from
         # https://arxiv.org/pdf/2207.12598 i.e.
@@ -226,6 +239,12 @@ class Unet(nn.Module):
         # You will have to call self.forward two times.
         # For unconditional sampling, pass None in`text_emb`.
         ##################################################################
+
+        empty_cond = {**model_kwargs, "text_emb": None}
+        x_cond = self.forward(x, time, model_kwargs=model_kwargs)
+        x_uncond = self.forward(x, time, model_kwargs=empty_cond)
+
+        x = (cfg_scale + 1) * x_cond - cfg_scale * x_uncond
 
         ##################################################################
 
@@ -281,6 +300,25 @@ class Unet(nn.Module):
         #      skip connection from the downsampling path.
         #    - Make sure to pass the context to each ResNet block.
         ##################################################################
+        
+        residuals = []
+
+        for block in self.downs:
+            x = block[0](x, context=context)
+            residuals.append(x)
+            x = block[1](x, context=context)
+            residuals.append(x)
+            x = block[2](x)
+
+        x = self.mid_block1(x, context=context)
+        x = self.mid_block2(x, context=context)
+        
+        for block in self.ups:
+            x = block[0](x)
+            x_res = torch.cat((x, residuals.pop()), dim=1)
+            x = block[1](x_res, context=context)
+            x_res = torch.cat((x, residuals.pop()), dim=1)
+            x = block[2](x_res, context=context)
 
         ##################################################################
 
